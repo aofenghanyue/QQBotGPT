@@ -115,7 +115,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(chosen["provider"], "deepseek")
             self.assertEqual(chosen["model"], "deep-model")
             self.assertEqual(chosen["deepseek_key"], "test-key")
-            self.assertEqual(chosen["data_dir"], str(Path(folder) / ".data"))
+            self.assertTrue(Path(chosen["data_dir"]).samefile(Path(folder) / ".data"))
             key.unlink()
             normal = load_config(path)
             self.assertEqual(normal["model"], "chat-model")

@@ -1,0 +1,16 @@
+{
+  "app_id": "",
+  "app_secret": "",
+  "provider": "chatgpt",
+  "chatgpt_model": "",
+  "chatgpt_web_search": true,
+  "chatgpt_show_sources": false,
+  "deepseek_model": "deepseek-flash",
+  "deepseek_key_file": ".data/deepseek.key",
+  "data_dir": ".data",
+  "owner_only": true,
+  "group_members_can_chat": false,
+  "auto_chat": false,
+  "context_messages": 100,
+  "context_idle_minutes": 360
+}

@@ -1,0 +1,157 @@
+# QQBotGPT
+
+在 QQ 中使用自己的 ChatGPT 或 DeepSeek。支持私聊、群内 @、连续追问、独立会话记忆，以及 ChatGPT 网页搜索。程序运行在自己的电脑或服务器上，通过 QQ 官方机器人接口收发文字。
+
+[![Tests](https://github.com/aofenghanyue/QQBotGPT/actions/workflows/tests.yml/badge.svg)](https://github.com/aofenghanyue/QQBotGPT/actions/workflows/tests.yml)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
+[![License: 0BSD](https://img.shields.io/badge/License-0BSD-green)](LICENSE)
+
+## 功能
+
+- **两种模型服务**：使用官方 Sign in with ChatGPT 登录，或配置自己的 DeepSeek API Key；可以在 QQ 中切换。
+- **按会话管理**：私聊和各个群分别绑定，分别保存模型、思考强度和聊天记忆，重启后恢复。
+- **群成员使用**：默认只响应绑定账号；可开放已绑定群的所有成员 @提问，设置仍由绑定账号管理。
+- **按需搜索**：ChatGPT 遇到实时信息或联网请求时调用网页搜索。聊天默认隐藏来源，索要出处时再附网址。
+- **适合 QQ 阅读**：回复转换为纯文本，保留段落、普通列表和代码缩进。
+- **可长期运行**：SQLite 保存状态，支持 Linux systemd 服务和登录凭据续期。
+
+已在 Windows 本机、Linux 服务器、QQ 群聊及私聊中完成实际验证。当前主要支持文字对话；图片、语音、附件和工具执行尚未接入。自动接话默认关闭。
+
+## 准备
+
+- Python 3.10 或更新版本，以及 Git；也可以从仓库页面下载 ZIP。
+- 自己创建的 [QQ 官方机器人](https://q.qq.com/)，以及它的 AppID 和 AppSecret。在 QQ 开放平台配置 WebSocket，并开放需要使用的群聊或私聊场景。
+- 选择一种模型服务：符合 [Sign in with ChatGPT 接入条件](https://developers.openai.com/siwc/quickstart)的 ChatGPT 账户，或自己的 DeepSeek API Key。模型和网页搜索的可用性以账户实际授权结果为准。
+
+QQ 凭据负责收发消息，模型服务负责生成回答。本项目为独立开源项目。
+
+## 快速开始
+
+### 1. 下载并安装
+
+```bash
+git clone https://github.com/aofenghanyue/QQBotGPT.git
+cd QQBotGPT
+python -m venv .venv
+```
+
+Windows PowerShell：
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item config.example.json config.json
+```
+
+Linux / macOS：
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp config.example.json config.json
+```
+
+系统仅提供 `python3` 时，创建环境的命令改为 `python3 -m venv .venv`。如果 PowerShell 禁止激活环境，可用 `.\.venv\Scripts\python.exe` 代替后续命令中的 `python`。
+
+### 2. 配置 QQ 和模型服务
+
+编辑 `config.json`，填写 `app_id` 和 `app_secret`，然后选择一种模型服务。
+
+**ChatGPT**：保持 `"provider": "chatgpt"`，在当前电脑登录并测试：
+
+```bash
+python chatgpt.py login
+python bot.py --test-model
+```
+
+浏览器会打开官方登录页面，请完成登录和额度授权。终端显示登录成功后，连接测试应返回模型信息和“连接成功”。`chatgpt_model` 留空时使用账户返回的第一个可用模型；`python chatgpt.py models` 可查看列表。
+
+**DeepSeek**：将 `provider` 改为 `deepseek`，在项目中创建 `.data` 目录和 `.data/deepseek.key` 文件，只写入自己的 API Key，然后运行：
+
+```bash
+python bot.py --test-model
+```
+
+默认模型为 `deepseek-flash`，可以通过 `deepseek_model` 修改。两种服务可以同时配置，之后在 QQ 中切换。
+
+### 3. 启动并绑定
+
+```bash
+python bot.py --bind
+```
+
+用自己的 QQ 私聊机器人，或在目标群里 @机器人，发送终端显示的 `/绑定 …` 口令。口令 10 分钟内有效，只能使用一次。收到“绑定成功”后即可提问：
+
+```text
+你好，帮我整理一下今天的待办。
+联网查一下 Python 官网目前推荐的稳定版，简短回答。
+```
+
+群内发送问题和命令时请 @机器人。绑定、模型设置和记忆会保存，以后启动只需运行 `python bot.py`。同一个 QQ 机器人同时运行一个实例。
+
+### 4. 新增群和开放群成员使用
+
+机器人运行期间，在同一项目目录另开终端：
+
+```bash
+python bot.py --new-binding
+```
+
+在尚未绑定的新群中 @机器人并发送生成的口令，服务无需停止。每次口令仅用于一个新群，新生成的口令会替换上一条未使用的口令。
+
+需要让已绑定群的其他成员 @提问时，将 `group_members_can_chat` 改为 `true`，然后重启。修改模型、思考、记忆设置和清空记录仍限该会话的绑定账号。私聊继续只响应绑定账号。
+
+## QQ 命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `/帮助` | 查看命令说明 |
+| `/状态` | 查看当前模型、连接、记忆和最近一次搜索次数 |
+| `/模型` | 查看当前会话的模型服务和名称 |
+| `/模型 列表` | 列出当前服务的可用模型 |
+| `/模型 列表 chatgpt` | 列出 ChatGPT 可用模型；也可填写 `deepseek` |
+| `/模型 chatgpt <模型名>` | 切换当前会话的 ChatGPT 模型 |
+| `/模型 deepseek deepseek-flash` | 切换当前会话到 DeepSeek |
+| `/模型 默认` | 恢复配置文件中的模型选择 |
+| `/思考` | 查看当前思考设置及可选项 |
+| `/思考 高` | 设置当前会话的思考强度 |
+| `/思考 默认` | 恢复默认思考设置 |
+| `/记忆` | 查看记忆容量与过期时间 |
+| `/记忆 200` | 保留最近 200 条消息 |
+| `/记忆 过期 360` | 连续闲置 360 分钟后清除记忆；`0` 表示不过期 |
+| `/清空` | 清除当前会话的聊天记录，保留设置 |
+
+模型名请从账户实际列表中选择，思考档位以 `/思考` 的返回内容为准。设置从下一次请求生效，重启后保留。命令不会生成模型回答；查询模型列表需要访问对应服务。
+
+## 网页搜索和聊天记忆
+
+ChatGPT 默认按需使用官方 `web_search` 工具，可以直接说“联网查一下……”。普通聊天按需要直接回答。默认回复只显示正文，明确要求“附上来源”或“给我网址”时再显示出处；`/状态` 中的次数来自实际工具调用。
+
+搜索沿用已登录的 ChatGPT 计划，无需额外搜索 API Key，可能增加等待时间和用量。`chatgpt_web_search` 可关闭搜索，`chatgpt_show_sources` 可设置始终显示来源，修改后重启。DeepSeek 当前提供文字对话。
+
+默认保存最近 100 条消息，连续 6 小时没有新消息后清除。提问时，相关上下文发送给所选模型。群成员共享本群记忆，私聊和其他群保持独立。开放群成员使用后，模型请求使用部署者的凭据和额度。
+
+配置、登录和聊天记录保存在运行设备上，`config.json`、`.data/`、密钥与日志已加入 Git 忽略规则。共享配置示例或问题日志时，请使用脱敏内容。
+
+## 文档与开发
+
+| 文档 | 内容 |
+| --- | --- |
+| [配置参考](docs/配置参考.md) | 所有示例配置项、路径规则、命令行用法与设置优先级 |
+| [服务器部署](docs/服务器部署.md) | Ubuntu / Debian、登录迁移、systemd 和更新维护 |
+| [常见问题](docs/常见问题.md) | QQ 不回复、登录、额度、模型切换与搜索排查 |
+| [开发记录](docs/开发记录.md) | 已实现功能和验证范围 |
+| [产品与开发规划](docs/产品与开发规划.md) | 项目范围与后续方向 |
+| [贡献指南](CONTRIBUTING.md) | 本地检查、问题反馈和 Pull Request |
+
+运行自动化测试：
+
+```bash
+python -m unittest discover -v
+```
+
+测试使用模拟响应和临时数据，无需 QQ 或模型凭据，也不会发出真实聊天请求。GitHub Actions 在 Windows、Linux 和 Python 3.10 / 3.12 上运行相同检查。
+
+## 许可证
+
+采用 [BSD Zero Clause License（0BSD）](LICENSE)。允许自由使用、复制、修改和分发，包括商用及闭源用途，无需保留版权声明或署名。软件按现状提供，不附带担保。依赖库及外部服务遵循各自的许可证和使用条款。

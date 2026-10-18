@@ -1,0 +1,32 @@
+[Unit]
+Description=QQBotGPT personal QQ assistant
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/qqbotgpt/config.json
+
+[Service]
+Type=simple
+User=qqbotgpt
+Group=qqbotgpt
+WorkingDirectory=/opt/qqbotgpt
+ExecStart=/opt/qqbotgpt/.venv/bin/python /opt/qqbotgpt/bot.py --config /etc/qqbotgpt/config.json
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGINT
+TimeoutStopSec=20
+StateDirectory=qqbotgpt
+StateDirectoryMode=0700
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qqbotgpt
+MemoryMax=180M
+TasksMax=32
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

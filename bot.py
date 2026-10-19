@@ -716,7 +716,7 @@ class Bot:
 
     async def answer(self, history, at, group=""):
         history = self.context_for_request(group, history)
-        prompt = (self.c.get("system_prompt") or SYSTEM) + QQ_TEXT_STYLE
+        prompt = self.answer_prompt()
         if not at:
             prompt += """\n本次是无人@你的普通群聊。你首先判断此刻是否值得主动发言，默认保持安静。
 只有能对当前话题给出具体帮助、尚未出现的相关信息、关键澄清，或群友明确邀请大家参与且你有贴切内容时，才直接输出简短回复。
@@ -779,6 +779,9 @@ class Bot:
         if not content and choice.get("finish_reason") == "length":
             return "这次生成达到长度上限，还没形成完整回答。可以缩小问题范围后再@我。" if at else "[SKIP]"
         return content[:1200]
+
+    def answer_prompt(self):
+        return (self.c.get("system_prompt") or SYSTEM) + QQ_TEXT_STYLE
 
     async def worker(self):
         while True:
@@ -996,7 +999,7 @@ class Bot:
                     await worker
 
 
-def load_config(path, provider=None):
+def load_config(path, provider=None, *, require_qq=True):
     config_path = Path(path).resolve()
     conf = json.loads(config_path.read_text(encoding="utf-8-sig"))
     configured_provider = conf.get("provider", "chatgpt")
@@ -1006,7 +1009,7 @@ def load_config(path, provider=None):
     for key in ("chatgpt_web_search", "chatgpt_show_sources"):
         if key in conf and type(conf[key]) is not bool:
             raise ValueError(key + " 必须为 true 或 false")
-    if not all(conf.get(k) for k in ("app_id", "app_secret")):
+    if require_qq and not all(conf.get(k) for k in ("app_id", "app_secret")):
         raise ValueError("请先在 config.json 中填写 QQ 机器人的 app_id 和 app_secret")
     data_dir = secure_directory(config_path.parent / conf.get("data_dir", ".data"))
     conf["data_dir"] = str(data_dir)

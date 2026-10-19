@@ -43,3 +43,4 @@ jobs:
         run: |
           python bot.py --help
           python chatgpt.py --help
+          python weixin.py --help

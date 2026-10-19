@@ -2,6 +2,8 @@
 
 在 QQ 中使用自己的 ChatGPT 或 DeepSeek。支持私聊、群内 @、连续追问、独立会话记忆，以及 ChatGPT 网页搜索。程序运行在自己的电脑或服务器上，通过 QQ 官方机器人接口收发文字。
 
+另提供 [微信 ClawBot 私聊入口](docs/微信接入.md)：多个微信号分别扫码，分别保存记忆和模型设置，复用现有模型服务。微信入口仅接受扫码账号的私聊，支持文字，不接入群聊。
+
 [![Tests](https://github.com/aofenghanyue/QQBotGPT/actions/workflows/tests.yml/badge.svg)](https://github.com/aofenghanyue/QQBotGPT/actions/workflows/tests.yml)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 [![License: 0BSD](https://img.shields.io/badge/License-0BSD-green)](LICENSE)
@@ -139,6 +141,7 @@ ChatGPT 默认按需使用官方 `web_search` 工具，可以直接说“联网�
 | --- | --- |
 | [配置参考](docs/配置参考.md) | 所有示例配置项、路径规则、命令行用法与设置优先级 |
 | [服务器部署](docs/服务器部署.md) | Ubuntu / Debian、登录迁移、systemd 和更新维护 |
+| [微信接入](docs/微信接入.md) | ClawBot 私聊、多个微信号扫码、独立记忆与常驻服务 |
 | [常见问题](docs/常见问题.md) | QQ 不回复、登录、额度、模型切换与搜索排查 |
 | [开发记录](docs/开发记录.md) | 已实现功能和验证范围 |
 | [产品与开发规划](docs/产品与开发规划.md) | 项目范围与后续方向 |

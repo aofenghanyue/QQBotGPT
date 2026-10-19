@@ -1,0 +1,32 @@
+[Unit]
+Description=QQBotGPT Weixin ClawBot private assistant
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/qqbotgpt/config.json
+
+[Service]
+Type=simple
+User=qqbotgpt
+Group=qqbotgpt
+WorkingDirectory=/opt/qqbotgpt-weixin
+ExecStart=/opt/qqbotgpt-weixin/.venv/bin/python /opt/qqbotgpt-weixin/weixin.py --config /etc/qqbotgpt/config.json run
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGINT
+TimeoutStopSec=20
+StateDirectory=qqbotgpt
+StateDirectoryMode=0700
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qqbotgpt
+MemoryMax=256M
+TasksMax=32
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

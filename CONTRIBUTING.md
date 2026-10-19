@@ -32,6 +32,7 @@ Pull Request 请说明解决的问题、主要行为变化和验证结果。中�
 | `bot.py` | QQ 网关、消息路由、绑定、会话设置、SQLite 记忆与回复格式 |
 | `chatgpt.py` | ChatGPT 登录、令牌校验与续期、模型列表、Responses 流和网页引用 |
 | `weixin.py` | ClawBot 扫码登录、多账号私聊、持久化消息队列与权限过滤 |
+| `attachments.py` | QQ/微信附件解析、引用选择、下载解密及 Responses 多模态输入 |
 | `test_*.py` | 登录、消息处理、权限、持久化、格式与搜索回归测试 |
 | `config.example.json` | 可公开的默认配置 |
 | `deploy/qqbotgpt.service` | Linux 常驻服务模板 |

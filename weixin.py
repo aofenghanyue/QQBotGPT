@@ -1,4 +1,4 @@
-"""ClawBot direct chats: QR login, independent accounts, persistent text replies.
+"""ClawBot direct chats: QR login, independent accounts, image/file inputs and text replies.
 
 Wire format checked against Tencent/openclaw-weixin 2.4.10; see docs/微信接入.md.
 Only the owner returned by QR confirmation can use each account.
@@ -21,11 +21,12 @@ from filelock import FileLock, Timeout
 
 from bot import ApiError, Bot, QQ_TEXT_STYLE, SYSTEM, load_config, qq_reply, test_model, wants_sources
 from chatgpt import ChatGPT, ChatGPTError, secure_directory, write_json
+from attachments import AttachmentError, weixin_media
 
 LOG = logging.getLogger("weixin")
 API_BASE = "https://ilinkai.weixin.qq.com"
 PROTOCOL_VERSION = "2.4.10"
-HELP = """直接发送文字即可聊天。
+HELP = """直接发送文字即可聊天，也可发送图片或文件后紧接着提问。
 
 /帮助  查看命令
 /状态  查看运行状态
@@ -39,7 +40,8 @@ HELP = """直接发送文字即可聊天。
 /清空  清除当前聊天记录
 
 需要搜索时，直接说“联网查一下……”。
-当前仅支持文字私聊。
+ChatGPT 每轮最多读取最近两张图片或一个文件，回复引用原消息可再次读取。
+普通追问沿用文字上下文；单独发送的附件请在5分钟内提问。
 各微信号的记忆和设置独立。"""
 
 
@@ -276,7 +278,7 @@ class WeixinBot(Bot):
 
     def answer_prompt(self):
         return ((self.c.get("system_prompt") or SYSTEM.replace("QQ", "微信"))
-                + QQ_TEXT_STYLE.replace("QQ", "微信") + "\n当前是微信私聊，只处理文字，不参与群聊。")
+                + QQ_TEXT_STYLE.replace("QQ", "微信") + "\n当前是微信私聊，支持文字、图片和文件，不参与群聊。")
 
     async def command(self, text):
         scope, name = self.scope, text.split()[0]
@@ -324,19 +326,28 @@ class WeixinBot(Bot):
                 continue
             self.expire_memory(self.scope)
             if reply is None:
-                items = msg.get("item_list") or []
-                if not isinstance(items, list):
-                    items = []
-                # Mixed media must not imply that the model has seen an attachment.
-                text_only = bool(items) and all(isinstance(item, dict) and item.get("type") == 1
-                    and isinstance(item.get("text_item"), dict)
-                    and isinstance(item["text_item"].get("text"), str) for item in items)
-                text = "\n".join(item["text_item"]["text"] for item in items).strip() if text_only else ""
-                sources = []
-                if not text_only or not text:
-                    reply = "当前微信助手支持文字聊天。请把问题以文字发来，图片、语音和文件暂未接入。"
-                elif len(text) > 12000:
-                    reply = "这条消息较长，请拆成每条12000字以内再发送。"
+                text, sources, media = "", [], []
+                try:
+                    text, current, quoted, references = weixin_media(msg)
+                    if text.startswith("/") or text == "帮助":
+                        self.attachments.discard(self.scope, self.record['user_id'])
+                    elif len(text) > 12000:
+                        self.attachments.discard(self.scope, self.record['user_id'])
+                        reply = "这条消息较长，请拆成每条12000字以内再发送。"
+                    else:
+                        if (current or quoted) and self.model_settings(self.scope)["provider"] != "chatgpt":
+                            raise AttachmentError("图片和文件阅读请先用 /模型 chatgpt 切换到 ChatGPT，再重新发送附件。")
+                        media, reply = self.attachments.prepare(self.scope, self.record['user_id'],
+                                                               mid, text, current, quoted, references)
+                        if not text and media:
+                            text = "请分析所引用的附件。"
+                        elif not text and reply is None:
+                            reply = "请发送文字问题，也可以先发图片或文件，再紧接着提问。"
+                except AttachmentError as exc:
+                    self.attachments.discard(self.scope, self.record['user_id'])
+                    reply = str(exc)
+                if reply is not None:
+                    pass
                 elif text.startswith("/") or text == "帮助":
                     try:
                         reply = await self.command(text)
@@ -354,7 +365,9 @@ class WeixinBot(Bot):
                         self.db.execute("DELETE FROM memory_seen WHERE at < ?", (time.time() - 86400,))
                         self.db.commit()
                     try:
-                        reply = await self.answer(list(self.history[self.scope]), True, self.scope)
+                        history = list(self.history[self.scope])
+                        reply = (await self.answer(history, True, self.scope, attachments=media) if media
+                                 else await self.answer(history, True, self.scope))
                         sources = self.last_model.get(self.scope, {}).get("web_sources", [])
                     except Exception as exc:
                         self.last_error = (str(exc) if isinstance(exc, ChatGPTError)
@@ -394,6 +407,7 @@ class WeixinBot(Bot):
                     try:
                         await self.process_pending(api)
                         self.expire_memory(self.scope)
+                        self.attachments.prune()
                         row = self.db.execute("SELECT cursor FROM wx_cursor WHERE generation=?", (self.generation,)).fetchone()
                         batch = await api.updates(row[0] if row else "", timeout)
                         self.ingest(batch)
@@ -468,7 +482,7 @@ async def serve(config, root, only=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="微信 ClawBot 文字私聊助手，支持多个微信号")
+    parser = argparse.ArgumentParser(description="微信 ClawBot 私聊助手，支持多账号、图片和文件阅读")
     parser.add_argument("--config", default="config.json", help="模型配置文件；无需 QQ 凭据")
     sub = parser.add_subparsers(dest="command", required=True)
     auth = sub.add_parser("login", help="用指定微信号扫码连接")

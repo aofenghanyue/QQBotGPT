@@ -126,6 +126,13 @@ class RequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call.args[0], "https://api.openai.com/v1/responses")
         self.assertEqual(call.kwargs["json"], dict(model="available", instructions="instructions", input=history,
                                                  store=False, stream=True))
+        self.assertEqual(call.kwargs["timeout"].total, 150)
+        self.assertEqual(call.kwargs["timeout"].sock_read, 60)
+        response.content = sse([{"type": "response.completed", "response": {"output": [
+            {"type": "message", "content": [{"type": "output_text", "text": "answer"}], "role": "assistant"}]}}])
+        await self.client.answer(session, history, "instructions", timeout_seconds=240)
+        self.assertEqual(session.post.call_args.kwargs["timeout"].total, 240)
+        self.assertIsNone(session.post.call_args.kwargs["timeout"].sock_read)
 
     async def test_stream_failure_and_interruption_never_return_partial_answer(self):
         partial = {"type": "response.output_text.delta", "delta": "partial"}

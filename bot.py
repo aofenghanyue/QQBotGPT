@@ -20,8 +20,11 @@ import aiohttp
 from chatgpt import ChatGPT, ChatGPTError, secure_directory, supported_efforts
 from filelock import FileLock, Timeout
 from attachments import AttachmentError, AttachmentStore, input_parts, qq_media
+from diagnostics import SendFailureStore
 
 LOG = logging.getLogger("qqbot")
+MODEL_PROGRESS_SECONDS = 60
+MODEL_REPLY_BUDGET = 270  # Reserve 30 seconds in QQ's five-minute group reply window.
 SYSTEM = """你是一个个人 QQ 助手。直接回答问题，表达清楚，按需要给出具体解释或步骤。
 不确定时说明不确定，不编造事实或来源。中文采用直接陈述，避免先否定再转折的固定句式。
 支持 QQ 文字、图片和文件；只根据本次实际提供的附件内容回答，没有取得的图片、文件或网页信息不声称看过。
@@ -132,13 +135,19 @@ def qq_reply(text, sources=(), limit=3000, show_sources=False):
 
 
 class ApiError(Exception):
-    pass
+    def __init__(self, message, *, status=None, code=None, response=None, trace_id=None):
+        super().__init__(message)
+        self.status, self.code = status, code
+        self.response, self.trace_id = response, trace_id
 
 
-def check_response(status, data):
+def check_response(status, data, *, trace_id=None):
+    if not isinstance(data, dict):
+        raise ApiError(f"HTTP={status} invalid response", status=status, response=data, trace_id=trace_id)
     code = data.get("err_code") or data.get("code") or 0
     if status >= 300 or code not in (0, "0"):
-        raise ApiError(f"HTTP={status} code={code}")
+        raise ApiError(f"HTTP={status} code={code}", status=status, code=code, response=data,
+                       trace_id=trace_id or data.get("trace_id"))
     return data
 
 
@@ -185,9 +194,11 @@ class Bot:
         self.db.execute("CREATE TABLE IF NOT EXISTS owners (scope TEXT PRIMARY KEY, user_id TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS group_model (grp TEXT PRIMARY KEY, settings TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS group_chatgpt_thinking (grp TEXT PRIMARY KEY, effort TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS group_timeout (grp TEXT PRIMARY KEY, seconds INTEGER NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS binding_token (id INTEGER PRIMARY KEY CHECK(id=1), digest TEXT NOT NULL, expires REAL NOT NULL)")
         self.db.commit()
         self.attachments = AttachmentStore(self.db)
+        self.send_failures = SendFailureStore(self.db)
         self.restore_memory()
 
     def issue_group_binding(self):
@@ -295,6 +306,38 @@ class Bot:
     def chatgpt_effort(self, group):
         row = self.db.execute("SELECT effort FROM group_chatgpt_thinking WHERE grp=?", (group,)).fetchone()
         return row[0] if row else None
+
+    def model_timeout(self, group, at=True):
+        row = self.db.execute("SELECT seconds FROM group_timeout WHERE grp=?", (group,)).fetchone()
+        value = row[0] if row else self.c.get("model_timeout_seconds")
+        if value is None:
+            if self.model_settings(group)["provider"] == "chatgpt":
+                return 150
+            mode = self.thinking(group)["mode"]
+            return 90 if mode == "all" or (mode == "at" and at) else 55
+        if type(value) is not int or not 30 <= value <= 240:
+            raise ValueError("model_timeout_seconds 必须为 30～240 的整数或 null")
+        return value
+
+    def timeout_status(self, group):
+        return f"模型等待上限：{self.model_timeout(group)} 秒；处理超过一分钟先提示正在思考。"
+
+    def timeout_command(self, group, text, role):
+        args = text.split()[1:]
+        usage = "/超时 240：设置等待上限（30～240 秒）\n/超时 默认：恢复默认\n/等待 也可使用；只影响当前会话。"
+        if not args or args in (["查看"], ["帮助"]):
+            return self.timeout_status(group) + "\n" + usage
+        if role not in ("owner", "admin"):
+            return "只有本会话的绑定账号或设置管理员可以修改等待上限。"
+        if args == ["默认"]:
+            self.db.execute("DELETE FROM group_timeout WHERE grp=?", (group,))
+        elif len(args) == 1 and re.fullmatch(r"[0-9]{2,3}", args[0]) and 30 <= int(args[0]) <= 240:
+            self.db.execute("INSERT INTO group_timeout VALUES (?,?) ON CONFLICT(grp) DO UPDATE SET seconds=excluded.seconds",
+                            (group, int(args[0])))
+        else:
+            return "设置未更改，请输入 30～240 的整数秒数。\n" + usage
+        self.db.commit()
+        return "设置已保存，从下一次请求生效；重启后保留。\n" + self.timeout_status(group)
 
     async def chatgpt_thinking_command(self, group, text, role):
         args = text.split()[1:]
@@ -453,6 +496,7 @@ class Bot:
         selection = self.model_status(group)
         search = ("按需使用，实时问题会查询" if self.c.get("chatgpt_web_search", True) else "已关闭") if self.model_settings(group)["provider"] == "chatgpt" else "当前 DeepSeek 未接入"
         selection += "\n网页搜索：" + search
+        selection += "\n" + self.timeout_status(group)
         if self.c.get("owner_only", True):
             access = "群成员@均可提问；修改设置限绑定账号" if not group.startswith("private:") and self.c.get("group_members_can_chat", False) else "仅绑定账号"
             return (f"当前会话状态\n{selection}\n使用范围：{access}\n"
@@ -695,7 +739,7 @@ class Bot:
             text = "请分析所引用的附件。" if media else "[用户没有附带文字问题]"
             if not media and not media_reply:
                 media_reply = "请发送文字问题，也可以先发图片或文件，再紧接着提问。"
-        command = bound_now or text.split()[0] in ("/模型", "/绑定", "/频率", "/思考", "/记忆", "/上下文", "/status", "/状态", "/帮助", "/help", "/清空") or (at and text == "帮助")
+        command = bound_now or text.split()[0] in ("/模型", "/绑定", "/频率", "/思考", "/超时", "/等待", "/记忆", "/上下文", "/status", "/状态", "/帮助", "/help", "/清空") or (at and text == "帮助")
         name = str(author.get("username") or "群成员")[:40]
         if not command and not media_reply:
             inserted = self.db.execute("INSERT OR IGNORE INTO memory_seen VALUES (?,?)", (mid, now)).rowcount
@@ -741,7 +785,34 @@ class Bot:
         token = await self.access_token()
         async with self.http.request(method, self.c.get("qq_api_base", "https://api.bot.qq.com") + path,
                                      json=body, headers={"Authorization": "QQBot " + token}) as response:
-            return check_response(response.status, await response.json())
+            trace_id = response.headers.get("X-Tps-Trace-ID") or response.headers.get("X-Request-ID")
+            try:
+                data = await response.json()
+            except (ValueError, aiohttp.ContentTypeError):
+                raw = await response.text()
+                raise ApiError(f"HTTP={response.status} non-JSON response", status=response.status,
+                               response={"raw_body": raw[:16384], "truncated": len(raw) > 16384},
+                               trace_id=trace_id) from None
+            return check_response(response.status, data, trace_id=trace_id)
+
+    async def send_reply(self, group, mid, content, seq, *, stage, answer=None, timeout=None):
+        target = ("/v2/users/" + quote(group[8:], safe='')) if group.startswith("private:") else ("/v2/groups/" + quote(group, safe=''))
+        try:
+            return await asyncio.wait_for(self.qq("POST", target + "/messages", {
+                "msg_type": 0, "content": content, "msg_id": mid, "msg_seq": seq}), timeout=timeout)
+        except Exception as exc:
+            try:
+                selected = self.model_settings(group)
+                record_id = self.send_failures.record(group, mid, stage, content, answer, {
+                    "error_type": type(exc).__name__, "error": str(exc),
+                    "http_status": getattr(exc, "status", None), "code": getattr(exc, "code", None),
+                    "trace_id": getattr(exc, "trace_id", None), "response": getattr(exc, "response", None),
+                    "msg_seq": seq, "provider": selected["provider"], "model": selected["model"],
+                    "reasoning_effort": self.chatgpt_effort(group) if selected["provider"] == "chatgpt" else None})
+                LOG.warning("qq_send_failure_saved id=%s stage=%s", record_id, stage)
+            except Exception as record_error:
+                LOG.error("qq_send_failure_save_failed type=%s", type(record_error).__name__)
+            raise
 
     async def answer(self, history, at, group="", attachments=()):
         history = self.context_for_request(group, history)
@@ -782,7 +853,8 @@ class Bot:
                     history.append({"role": "user", "content": "请分析所提供的附件。"})
                 history[-1]["content"] = [{"type": "input_text", "text": history[-1]["content"]}] + parts
                 prompt += "\n本轮只提供最近或被明确引用的最多两张图片或一个文件，请结合当前问题分析。"
-            content, usage = await client.answer(self.http, history, prompt, selected["model"], reasoning_effort=effort, web_search=search)
+            content, usage = await client.answer(self.http, history, prompt, selected["model"], reasoning_effort=effort, web_search=search,
+                                                timeout_seconds=self.model_timeout(group, at))
             self.last_model[group] = {"at": time.time(), "messages": len(history),
                 "chars": context_chars, "thinking": None, "reasoning_effort": effort,
                 "input_tokens": usage.get("input_tokens", "未知"), "output_tokens": usage.get("output_tokens", "未知"),
@@ -802,7 +874,7 @@ class Bot:
             body["reasoning_effort"] = s["effort"]
         async with self.http.post("https://api.deepseek.com/chat/completions", headers={
             "Authorization": "Bearer " + self.deepseek_key()
-        }, json=body, timeout=aiohttp.ClientTimeout(total=90 if enabled else 55)) as response:
+        }, json=body, timeout=aiohttp.ClientTimeout(total=self.model_timeout(group, at))) as response:
             data = check_response(response.status, await response.json())
         choice = data["choices"][0]
         usage = data.get("usage") or {}
@@ -828,8 +900,10 @@ class Bot:
             _, _, job = await self.queue.get()
             group, mid, text, at, stamp, history, command, role, version, memory_version, media, media_reply = job
             sources = []
+            reply_seq = 1
+            generated_answer = None
             try:
-                if time.time() - stamp > 210:
+                if time.time() - stamp > (MODEL_REPLY_BUDGET if at or command else 210):
                     continue
                 self.expire_memory(group)
                 if not command and memory_version != self.memory_version[group]:
@@ -849,6 +923,8 @@ class Bot:
                     reply = "绑定口令无效或已过期，或本群已经绑定。请部署者生成新的群绑定口令。"
                 elif command and text.split()[0] == "/频率":
                     reply = self.frequency_command(group, text, role)
+                elif command and text.split()[0] in ("/超时", "/等待"):
+                    reply = self.timeout_command(group, text, role)
                 elif command and text.split()[0] in ("/模型", "/思考"):
                     try:
                         if text.split()[0] == "/模型":
@@ -890,21 +966,47 @@ class Bot:
                         reply = "只有本会话的绑定账号可以清空记忆。" if self.c.get("owner_only", True) else "只有群主或管理员可以清空本群记忆。"
                     else:
                         self.clear_memory(group)
+                        self.send_failures.clear(group)
                         reply = "本群内存和数据库中的聊天记录已清空，旧上下文排队任务已取消；本群设置保留。"
                 elif command:
                     reply = "命令格式有误，请发送 /帮助 查看用法。"
                 else:
+                    started = time.monotonic()
+                    budget = min(self.model_timeout(group, at), max(0, MODEL_REPLY_BUDGET - (time.time() - stamp)))
+                    request = None
                     try:
-                        reply = await self.answer(history, at, group, attachments=media) if media else await self.answer(history, at, group)
+                        answer = self.answer(history, at, group, attachments=media) if media else self.answer(history, at, group)
+                        request = asyncio.create_task(asyncio.wait_for(answer, timeout=budget))
+                        if at and budget > MODEL_PROGRESS_SECONDS:
+                            # Progress does not extend the request's deadline or enter chat memory.
+                            await asyncio.wait({request}, timeout=MODEL_PROGRESS_SECONDS)
+                            if not request.done():
+                                reply_seq = 2  # Also advance on ambiguous delivery failures.
+                                try:
+                                    await self.send_reply(group, mid, "正在思考，请稍等。", 1, stage="progress", timeout=10)
+                                    LOG.info("model_progress_sent")
+                                except (ApiError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                                    LOG.warning("model_progress_failed type=%s", type(exc).__name__)
+                        reply = await request
+                        generated_answer = reply
                         sources = self.last_model.get(group, {}).get("web_sources", [])
                     except Exception as exc:
-                        self.last_error = str(exc) if isinstance(exc, ChatGPTError) else f"模型连接失败（{type(exc).__name__}），请稍后重试。"
-                        LOG.warning("model_failed type=%s", type(exc).__name__)
+                        if isinstance(exc, asyncio.TimeoutError):
+                            self.last_error = "本次等待已超时，已停止等待回答。请稍后重试；可用 /超时 查看或调整上限。"
+                        else:
+                            self.last_error = str(exc) if isinstance(exc, ChatGPTError) else f"模型连接失败（{type(exc).__name__}），请稍后重试。"
+                        LOG.warning("model_failed type=%s elapsed=%.1f budget=%.1f", type(exc).__name__, time.monotonic() - started, budget)
                         if not at:
                             self.last_auto_decision[group] = {"at": time.time(), "result": "调用失败，保持安静"}
                             continue
                         reply = self.last_error
+                    finally:
+                        if request is not None:
+                            request.cancel()
+                            with contextlib.suppress(asyncio.CancelledError, Exception):
+                                await request
                 if command and text in ("/帮助", "/help", "帮助"):
+                    reply += "\n/超时：查看等待上限；/超时 240：调整秒数；/超时 默认：恢复默认。处理超过一分钟先提示正在思考。"
                     reply += ("\nChatGPT 支持图片和文件阅读：先发附件，再在5分钟内紧接着提问，也可同条发送。"
                               "每轮最多两张图片或一个文件；回复引用原消息可再次读取，普通追问不重复上传附件。")
                 if not command and not at:
@@ -920,9 +1022,8 @@ class Bot:
                     reply = "刚才没能生成有效回复，可以再说一遍吗？"
                 if self.c.get("owner_only", True) and command:
                     reply = reply.replace("本群", "本会话")
-                target = ("/v2/users/" + quote(group[8:], safe='')) if group.startswith("private:") else ("/v2/groups/" + quote(group, safe=''))
-                await self.qq("POST", target + "/messages", {
-                    "msg_type": 0, "content": reply, "msg_id": mid, "msg_seq": 1})
+                await self.send_reply(group, mid, reply, reply_seq,
+                                      stage="command" if command else "answer", answer=generated_answer)
                 if not command and not media_reply:
                     self.last_sent[group] = time.time()
                     self.counts[group] = 0
@@ -1014,6 +1115,7 @@ class Bot:
         while True:
             await asyncio.sleep(60)
             self.attachments.prune()
+            self.send_failures.prune()
             for group in list(self.history_time):
                 self.expire_memory(group)
 
@@ -1052,6 +1154,9 @@ def load_config(path, provider=None, *, require_qq=True):
     conf["provider"] = provider or configured_provider
     if conf["provider"] not in ("chatgpt", "deepseek"):
         raise ValueError("provider 只支持 chatgpt 或 deepseek")
+    timeout = conf.get("model_timeout_seconds")
+    if timeout is not None and (type(timeout) is not int or not 30 <= timeout <= 240):
+        raise ValueError("model_timeout_seconds 必须为 30～240 的整数或 null")
     for key in ("chatgpt_web_search", "chatgpt_show_sources"):
         if key in conf and type(conf[key]) is not bool:
             raise ValueError(key + " 必须为 true 或 false")

@@ -153,9 +153,11 @@ class ModelSettingsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_each_request_uses_its_conversation_provider_and_effort(self):
         self.bot.chatgpt.answer = AsyncMock(return_value=("ChatGPT reply", {}))
+        self.bot.timeout_command("chat", "/超时 240", "owner")
         await self.bot.chatgpt_thinking_command("chat", "/思考 高", "owner")
         await self.bot.answer([{"role": "user", "content": "hello"}], True, "chat")
         self.assertEqual(self.bot.chatgpt.answer.call_args.kwargs["reasoning_effort"], "high")
+        self.assertEqual(self.bot.chatgpt.answer.call_args.kwargs["timeout_seconds"], 240)
         self.bot.model_catalog = AsyncMock(return_value=[{"slug": "deep-model", "efforts": ["low", "high", "max"]}])
         await self.bot.model_command("deep", "/模型 deepseek deep-model", "owner")
         self.bot.c["deepseek_key"] = "key"
@@ -169,6 +171,7 @@ class ModelSettingsTests(unittest.IsolatedAsyncioTestCase):
         sent = self.bot.http.post.call_args.kwargs["json"]
         self.assertEqual(sent["model"], "deep-model")
         self.assertEqual(sent["reasoning_effort"], "high")
+        self.assertEqual(self.bot.http.post.call_args.kwargs["timeout"].total, 90)
         self.assertEqual(self.bot.chatgpt.answer.await_count, 1)
         self.assertIn("DeepSeek", self.bot.status("deep"))
         self.assertIn("ChatGPT", self.bot.status("chat"))

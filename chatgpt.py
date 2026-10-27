@@ -337,7 +337,7 @@ class ChatGPT:
             raise ChatGPTError("配置的模型不在账户可用列表中，请发送 /模型 列表 查看。")
         return chosen
 
-    async def answer(self, session, history, instructions, model="", reasoning_effort=None, web_search=False):
+    async def answer(self, session, history, instructions, model="", reasoning_effort=None, web_search=False, timeout_seconds=None):
         chosen = await self.resolve_model(session, model)
         if reasoning_effort is not None and reasoning_effort not in supported_efforts(chosen):
             raise ChatGPTError("当前模型不支持这个思考强度，请发送 /思考 查看可用档位，或发送 /思考 默认。")
@@ -351,7 +351,8 @@ class ChatGPT:
             body["tool_choice"] = "auto"
         async with session.post(RESOURCE + "/responses", json=body,
                 headers={"Authorization": "Bearer " + token},
-                timeout=aiohttp.ClientTimeout(total=150, sock_read=60)) as response:
+                timeout=aiohttp.ClientTimeout(total=150 if timeout_seconds is None else timeout_seconds,
+                                             sock_read=60 if timeout_seconds is None else None)) as response:
             if response.status >= 300:
                 await response_json(response)
             return await collect_response(response.content)

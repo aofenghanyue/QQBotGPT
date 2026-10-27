@@ -44,3 +44,4 @@ jobs:
           python bot.py --help
           python chatgpt.py --help
           python weixin.py --help
+          python diagnostics.py --help

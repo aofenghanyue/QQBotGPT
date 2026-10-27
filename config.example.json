@@ -5,6 +5,7 @@
   "chatgpt_model": "",
   "chatgpt_web_search": true,
   "chatgpt_show_sources": false,
+  "model_timeout_seconds": null,
   "deepseek_model": "deepseek-flash",
   "deepseek_key_file": ".data/deepseek.key",
   "data_dir": ".data",

@@ -19,7 +19,8 @@ from urllib.parse import urlsplit
 import aiohttp
 from filelock import FileLock, Timeout
 
-from bot import ApiError, Bot, QQ_TEXT_STYLE, SYSTEM, load_config, qq_reply, test_model, wants_sources
+from bot import (ApiError, Bot, DeepSeekAnswer, QQ_TEXT_STYLE, SYSTEM, load_config,
+                 qq_reply, reasoning_messages, test_model, wants_sources)
 from chatgpt import ChatGPT, ChatGPTError, secure_directory, write_json
 from attachments import AttachmentError, weixin_media
 
@@ -272,6 +273,12 @@ class WeixinBot(Bot):
         self.db.execute("CREATE TABLE IF NOT EXISTS wx_inbox (generation TEXT, id TEXT, payload TEXT, reply TEXT, "
                         "chat INTEGER DEFAULT 0, done INTEGER DEFAULT 0, at REAL, PRIMARY KEY(generation,id))")
         self.db.execute("CREATE TABLE IF NOT EXISTS wx_cursor (generation TEXT PRIMARY KEY, cursor TEXT)")
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(wx_inbox)")}
+        for name, definition in (("reasoning_parts", "TEXT NOT NULL DEFAULT '[]'"),
+                                 ("reasoning_next", "INTEGER NOT NULL DEFAULT 0"),
+                                 ("reasoning_incomplete", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE wx_inbox ADD COLUMN {name} {definition}")
         self.db.execute("DELETE FROM wx_inbox WHERE generation != ?", (self.generation,))
         self.db.execute("DELETE FROM wx_cursor WHERE generation != ?", (self.generation,))
         self.db.commit()
@@ -317,9 +324,11 @@ class WeixinBot(Bot):
             self.db.execute("DELETE FROM wx_inbox WHERE done=1 AND at < ?", (time.time() - 86400,))
 
     async def process_pending(self, api):
-        rows = self.db.execute("SELECT id,payload,reply,chat FROM wx_inbox WHERE generation=? AND done=0 ORDER BY rowid",
+        rows = self.db.execute("SELECT id,payload,reply,chat,reasoning_parts,reasoning_next,reasoning_incomplete "
+                               "FROM wx_inbox WHERE generation=? AND done=0 ORDER BY rowid",
                                (self.generation,)).fetchall()
-        for mid, payload, reply, chat in rows:
+        for mid, payload, reply, chat, saved_parts, next_part, incomplete in rows:
+            parts = json.loads(saved_parts)
             msg = json.loads(payload)
             if not private_message(msg, self.record):
                 self.complete(mid)
@@ -375,20 +384,41 @@ class WeixinBot(Bot):
                         LOG.warning("weixin_model_failed account=%s type=%s", self.alias, type(exc).__name__)
                         reply = self.last_error
                         chat = 0
+                parts = reasoning_messages(reply.reasoning) if isinstance(reply, DeepSeekAnswer) else []
                 reply = qq_reply(reply, sources, show_sources=self.c.get("chatgpt_show_sources", False)
                                  or wants_sources(text)) or "刚才未能生成有效回复，请再试一次。"
-                self.db.execute("UPDATE wx_inbox SET reply=?,chat=? WHERE generation=? AND id=?",
-                                (reply, chat, self.generation, mid))
+                self.db.execute("UPDATE wx_inbox SET reply=?,chat=?,reasoning_parts=? WHERE generation=? AND id=?",
+                                (reply, chat, json.dumps(parts, ensure_ascii=False), self.generation, mid))
                 self.db.commit()
             client_id = "qqbotgpt-" + hashlib.sha256((self.generation + ":" + mid).encode()).hexdigest()[:32]
-            await api.send(msg, reply, client_id)
+            while next_part < len(parts) and not incomplete:
+                try:
+                    # Each part keeps its identity across retries and process restarts.
+                    await asyncio.wait_for(api.send(msg, parts[next_part],
+                                                    client_id + f"-reasoning-{next_part + 1}"), 5)
+                except LoginExpired:
+                    raise
+                except (WeixinError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    LOG.warning("weixin_reasoning_send_failed account=%s type=%s", self.alias, type(exc).__name__)
+                    incomplete = 1
+                else:
+                    next_part += 1
+                self.db.execute("UPDATE wx_inbox SET reasoning_next=?,reasoning_incomplete=? WHERE generation=? AND id=?",
+                                (next_part, incomplete, self.generation, mid))
+                self.db.commit()
+            delivered_reply = reply
+            if parts:
+                notice = "部分思考过程未能发送。\n" if incomplete else ""
+                delivered_reply = qq_reply(notice + "DeepSeek 回答：\n" + reply)
+            await api.send(msg, delivered_reply, client_id)
             if chat:
                 self.append_memory(self.scope, {"role": "assistant", "content": reply})
             self.complete(mid)
             LOG.info("weixin_reply_sent account=%s", self.alias)
 
     def complete(self, mid):
-        self.db.execute("UPDATE wx_inbox SET done=1,payload='',reply=NULL WHERE generation=? AND id=?",
+        self.db.execute("UPDATE wx_inbox SET done=1,payload='',reply=NULL,reasoning_parts='[]',"
+                        "reasoning_next=0,reasoning_incomplete=0 WHERE generation=? AND id=?",
                         (self.generation, mid))
         self.db.commit()
 

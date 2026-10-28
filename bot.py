@@ -160,7 +160,7 @@ class DeepSeekAnswer(str):
 
 
 def reasoning_messages(reasoning):
-    """Use at most three QQ replies, reserving slots for progress and the answer."""
+    """Bound reasoning for both channels; QQ also reserves progress/answer slots."""
     text = qq_plain_text(reasoning)
     if not text:
         return []
@@ -554,7 +554,7 @@ class Bot:
         args = text.split()[1:]
         usage = ("/思考 开启：@回复和自动接话均开启\n/思考 仅@：只对@回复开启\n"
                  "/思考 关闭\n/思考 强度 低|高|最高\n/思考 默认：恢复服务器默认值\n"
-                 "开启后可能增加等待时间和token消耗；QQ 会先发送模型返回的思考过程，再发送回答。")
+                 "开启后可能增加等待时间和token消耗；会先发送模型返回的思考过程，再发送回答。")
         if not args or args == ["查看"]:
             return self.thinking_status(group) + "\n" + usage
         if args == ["帮助"]:
@@ -580,7 +580,7 @@ class Bot:
         self.db.commit()
         LOG.info("thinking_updated")
         return ("设置已保存，重启后仍有效；从下一次模型请求生效。\n" +
-                self.thinking_status(group) + "\n开启后可能增加等待时间和token消耗；群里只发送最终回答。")
+                self.thinking_status(group) + "\n开启后可能增加等待时间和token消耗；会先发送模型返回的思考过程，再发送回答。")
 
     def frequency(self, group):
         settings = {key: self.c.get(key, default) for key, default in (
@@ -903,7 +903,7 @@ class Bot:
                                   "chars": sum(len(m["content"]) for m in history), "thinking": enabled,
                                   "input_tokens": usage.get("prompt_tokens", "未知"),
                                   "output_tokens": usage.get("completion_tokens", "未知")}
-        # QQ can display provider reasoning separately; history retains only content.
+        # Both channels display provider reasoning separately; history retains only content.
         content = (choice["message"].get("content") or "").strip()
         reasoning = (choice["message"].get("reasoning_content") or "").strip() if enabled else ""
         self.last_error = "无"

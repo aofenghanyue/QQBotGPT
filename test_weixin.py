@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from bot import load_config
+from bot import DeepSeekAnswer, load_config
 from weixin import (API_BASE, LoginExpired, WeixinAPI, WeixinBot, WeixinError,
                     account_name, api_base, credentials, login, private_message, read_json, save_account, serve)
 
@@ -99,6 +99,93 @@ class WeixinTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.memory_settings(self.bot.scope)["limit"], 200)
         self.assertEqual(self.bot.answer.await_count, 2)
         self.assertIn("各微信号的记忆和设置独立", self.api.send.call_args.args[1])
+
+    async def test_deepseek_reasoning_precedes_answer_and_stays_out_of_history(self):
+        self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容。" * 2000)
+        self.ingest(message())
+        await self.bot.process_pending(self.api)
+        calls = self.api.send.call_args_list
+        self.assertEqual(len(calls), 4)
+        self.assertTrue(all(len(call.args[1]) <= 3000 for call in calls))
+        self.assertIn("DeepSeek 思考过程（1/3）", calls[0].args[1])
+        self.assertIn("后续部分已省略", calls[2].args[1])
+        self.assertEqual(calls[3].args[1], "DeepSeek 回答：\n最终回答")
+        self.assertEqual(len({call.args[2] for call in calls}), 4)
+        self.assertTrue(all(call.args[0]["context_token"] == "reply-context" for call in calls))
+        self.assertEqual(self.bot.history[self.bot.scope][-1]["content"], "最终回答")
+        self.assertEqual(self.bot.db.execute("SELECT reasoning_parts FROM wx_inbox").fetchone()[0], "[]")
+        self.bot.answer.return_value = "后续回答"
+        self.ingest(message("2", "继续"))
+        await self.bot.process_pending(self.api)
+        history = self.bot.answer.call_args.args[0]
+        self.assertEqual([m["content"] for m in history], ["你好", "最终回答", "继续"])
+
+    async def test_deepseek_without_reasoning_sends_only_answer(self):
+        self.bot.answer.return_value = DeepSeekAnswer("最终回答")
+        self.ingest(message())
+        await self.bot.process_pending(self.api)
+        self.api.send.assert_awaited_once()
+        self.assertEqual(self.api.send.call_args.args[1], "最终回答")
+
+    async def test_reasoning_failure_does_not_block_answer_or_repeat_after_restart(self):
+        self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容" * 1000)
+        self.ingest(message())
+        self.api.send.side_effect = [WeixinError("rejected"), asyncio.TimeoutError()]
+        with self.assertRaises(asyncio.TimeoutError):
+            await self.bot.process_pending(self.api)
+        self.assertEqual(self.api.send.await_count, 2)
+        final_args = self.api.send.call_args.args
+        self.assertIn("部分思考过程未能发送", final_args[1])
+        self.assertIn("最终回答", final_args[1])
+        self.assertEqual(len(self.bot.history[self.bot.scope]), 1)
+        self.bot.db.close()
+        self.bot = WeixinBot(self.config, self.folder, record())
+        self.bot.answer = AsyncMock()
+        self.api.send.reset_mock(side_effect=True)
+        await self.bot.process_pending(self.api)
+        self.bot.answer.assert_not_awaited()
+        self.api.send.assert_awaited_once_with(*final_args)
+        self.assertEqual(self.bot.history[self.bot.scope][-1]["content"], "最终回答")
+
+    async def test_restart_resumes_unsent_reasoning_with_stable_ids(self):
+        self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容" * 1000)
+        self.ingest(message())
+        self.api.send.side_effect = [None, LoginExpired("expired")]
+        with self.assertRaises(LoginExpired):
+            await self.bot.process_pending(self.api)
+        pending_args = self.api.send.call_args.args
+        self.assertIn("（2/2）", pending_args[1])
+        self.bot.db.close()
+        self.bot = WeixinBot(self.config, self.folder, record())
+        self.bot.answer = AsyncMock()
+        self.api.send.reset_mock(side_effect=True)
+        await self.bot.process_pending(self.api)
+        self.bot.answer.assert_not_awaited()
+        self.assertEqual(self.api.send.await_count, 2)
+        self.assertEqual(self.api.send.call_args_list[0].args, pending_args)
+        self.assertEqual(self.api.send.call_args.args[1], "DeepSeek 回答：\n最终回答")
+
+    async def test_existing_inbox_schema_and_pending_reply_are_migrated(self):
+        self.bot.db.execute("DROP TABLE wx_inbox")
+        self.bot.db.execute("CREATE TABLE wx_inbox (generation TEXT, id TEXT, payload TEXT, reply TEXT, "
+                            "chat INTEGER DEFAULT 0, done INTEGER DEFAULT 0, at REAL, PRIMARY KEY(generation,id))")
+        self.bot.db.execute("INSERT INTO wx_inbox VALUES (?,?,?,?,?,?,?)",
+                            ("generation", "1", json.dumps(message()), "旧版待发送回答", 1, 0, time.time()))
+        self.bot.db.commit()
+        self.bot.db.close()
+        self.bot = WeixinBot(self.config, self.folder, record())
+        self.bot.answer = AsyncMock()
+        await self.bot.process_pending(self.api)
+        self.bot.answer.assert_not_awaited()
+        self.api.send.assert_awaited_once()
+        self.assertEqual(self.api.send.call_args.args[1], "旧版待发送回答")
+
+    async def test_thinking_help_and_confirmation_describe_shared_behavior(self):
+        for text in ("/思考", "/思考 开启"):
+            reply = await self.bot.command(text)
+            self.assertIn("先发送模型返回的思考过程，再发送回答", reply)
+            self.assertNotIn("QQ", reply)
+            self.assertNotIn("只发送最终回答", reply)
 
     async def test_two_accounts_have_independent_memory_settings_and_credentials(self):
         second_folder = self.folder / "second"

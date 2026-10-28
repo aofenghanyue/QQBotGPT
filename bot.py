@@ -151,6 +151,27 @@ def check_response(status, data, *, trace_id=None):
     return data
 
 
+class DeepSeekAnswer(str):
+    """Keep optional provider reasoning separate from the conversational answer."""
+    def __new__(cls, content, reasoning=""):
+        value = super().__new__(cls, content)
+        value.reasoning = reasoning
+        return value
+
+
+def reasoning_messages(reasoning):
+    """Use at most three QQ replies, reserving slots for progress and the answer."""
+    text = qq_plain_text(reasoning)
+    if not text:
+        return []
+    chunk_size, max_chunks = 2950, 3
+    if len(text) > chunk_size * max_chunks:
+        notice = "\n（思考过程较长，受消息长度限制，后续部分已省略。）"
+        text = text[:chunk_size * max_chunks - len(notice)] + notice
+    chunks = [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+    return [f"DeepSeek 思考过程（{i}/{len(chunks)}）：\n{chunk}" for i, chunk in enumerate(chunks, 1)]
+
+
 class Bot:
     def __init__(self, config, state_path):
         self.c = config
@@ -533,7 +554,7 @@ class Bot:
         args = text.split()[1:]
         usage = ("/思考 开启：@回复和自动接话均开启\n/思考 仅@：只对@回复开启\n"
                  "/思考 关闭\n/思考 强度 低|高|最高\n/思考 默认：恢复服务器默认值\n"
-                 "开启后可能增加等待时间和token消耗；群里只发送最终回答。")
+                 "开启后可能增加等待时间和token消耗；QQ 会先发送模型返回的思考过程，再发送回答。")
         if not args or args == ["查看"]:
             return self.thinking_status(group) + "\n" + usage
         if args == ["帮助"]:
@@ -882,15 +903,16 @@ class Bot:
                                   "chars": sum(len(m["content"]) for m in history), "thinking": enabled,
                                   "input_tokens": usage.get("prompt_tokens", "未知"),
                                   "output_tokens": usage.get("completion_tokens", "未知")}
-        # Keep reasoning out of QQ messages, logs, and subsequent chat history.
+        # QQ can display provider reasoning separately; history retains only content.
         content = (choice["message"].get("content") or "").strip()
+        reasoning = (choice["message"].get("reasoning_content") or "").strip() if enabled else ""
         self.last_error = "无"
         LOG.info("model_completed provider=deepseek model=%s thinking=%s effort=%s finish=%s context_messages=%s context_chars=%s", selected["model"], enabled,
                  s["effort"] if enabled else "none", choice.get("finish_reason", "unknown"),
                  len(history), self.last_model[group]["chars"])
         if not content and choice.get("finish_reason") == "length":
-            return "这次生成达到长度上限，还没形成完整回答。可以缩小问题范围后再@我。" if at else "[SKIP]"
-        return content[:1200]
+            content = "这次生成达到长度上限，还没形成完整回答。可以缩小问题范围后再@我。" if at else "[SKIP]"
+        return DeepSeekAnswer(content[:1200], reasoning)
 
     def answer_prompt(self):
         return (self.c.get("system_prompt") or SYSTEM) + QQ_TEXT_STYLE
@@ -1022,7 +1044,27 @@ class Bot:
                     reply = "刚才没能生成有效回复，可以再说一遍吗？"
                 if self.c.get("owner_only", True) and command:
                     reply = reply.replace("本群", "本会话")
-                await self.send_reply(group, mid, reply, reply_seq,
+                reasoning = generated_answer.reasoning if isinstance(generated_answer, DeepSeekAnswer) else ""
+                parts = reasoning_messages(reasoning)
+                reasoning_incomplete = False
+                for part in parts:
+                    remaining = MODEL_REPLY_BUDGET - (time.time() - stamp)
+                    if remaining <= 0:
+                        reasoning_incomplete = True
+                        break
+                    seq, reply_seq = reply_seq, reply_seq + 1
+                    try:
+                        await self.send_reply(group, mid, part, seq, stage="reasoning", answer=reasoning,
+                                              timeout=min(5, remaining))
+                    except (ApiError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                        LOG.warning("deepseek_reasoning_send_failed type=%s", type(exc).__name__)
+                        reasoning_incomplete = True
+                        break
+                delivered_reply = reply
+                if parts:
+                    notice = "部分思考过程未能发送。\n" if reasoning_incomplete else ""
+                    delivered_reply = qq_reply(notice + "DeepSeek 回答：\n" + reply)
+                await self.send_reply(group, mid, delivered_reply, reply_seq,
                                       stage="command" if command else "answer", answer=generated_answer)
                 if not command and not media_reply:
                     self.last_sent[group] = time.time()

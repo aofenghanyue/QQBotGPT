@@ -457,7 +457,7 @@ class BehaviourTests(unittest.IsolatedAsyncioTestCase):
         self.bot.http.post.return_value = context
         self.bot.c["deepseek_key"] = "test-key"
 
-    async def test_thinking_request_modes_and_final_only(self):
+    async def test_thinking_request_modes_keep_reasoning_separate(self):
         self.fake_http()
         for mode in ("关闭", "仅@", "开启"):
             self.bot.thinking_command("g1", "/思考 " + mode, "admin")
@@ -467,6 +467,7 @@ class BehaviourTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(reply, "最终回答")
                     body = self.bot.http.post.call_args.kwargs["json"]
                     enabled = mode == "开启" or (mode == "仅@" and at)
+                    self.assertEqual(reply.reasoning, "PRIVATE_REASONING_MARKER" if enabled else "")
                     self.assertEqual(body["thinking"]["type"], "enabled" if enabled else "disabled")
                     self.assertEqual("reasoning_effort" in body, enabled)
                     self.assertEqual(body["max_tokens"], 4096 if enabled else 500)
@@ -487,6 +488,8 @@ class BehaviourTests(unittest.IsolatedAsyncioTestCase):
         sent = self.bot.qq.call_args.args[2]["content"]
         self.assertIn("长度上限", sent)
         self.assertNotIn("PRIVATE_REASONING_MARKER", sent)
+        self.assertEqual(self.bot.qq.await_count, 2)
+        self.assertIn("PRIVATE_REASONING_MARKER", self.bot.qq.call_args_list[0].args[2]["content"])
 
     async def test_help_displays_thinking_and_worker_passes_group(self):
         self.bot.answer = AsyncMock(return_value="回答")

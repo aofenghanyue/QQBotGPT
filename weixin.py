@@ -385,6 +385,7 @@ class WeixinBot(Bot):
                         reply = self.last_error
                         chat = 0
                 parts = reasoning_messages(reply.reasoning) if isinstance(reply, DeepSeekAnswer) else []
+                LOG.info("weixin_reply_prepared account=%s reasoning_parts=%s", self.alias, len(parts))
                 reply = qq_reply(reply, sources, show_sources=self.c.get("chatgpt_show_sources", False)
                                  or wants_sources(text)) or "刚才未能生成有效回复，请再试一次。"
                 self.db.execute("UPDATE wx_inbox SET reply=?,chat=?,reasoning_parts=? WHERE generation=? AND id=?",
@@ -403,6 +404,7 @@ class WeixinBot(Bot):
                     incomplete = 1
                 else:
                     next_part += 1
+                    LOG.info("weixin_reasoning_sent account=%s part=%s total=%s", self.alias, next_part, len(parts))
                 self.db.execute("UPDATE wx_inbox SET reasoning_next=?,reasoning_incomplete=? WHERE generation=? AND id=?",
                                 (next_part, incomplete, self.generation, mid))
                 self.db.commit()
@@ -414,7 +416,8 @@ class WeixinBot(Bot):
             if chat:
                 self.append_memory(self.scope, {"role": "assistant", "content": reply})
             self.complete(mid)
-            LOG.info("weixin_reply_sent account=%s", self.alias)
+            LOG.info("weixin_reply_sent account=%s reasoning_sent=%s reasoning_total=%s reasoning_incomplete=%s",
+                     self.alias, next_part, len(parts), bool(incomplete))
 
     def complete(self, mid):
         self.db.execute("UPDATE wx_inbox SET done=1,payload='',reply=NULL,reasoning_parts='[]',"

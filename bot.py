@@ -907,9 +907,9 @@ class Bot:
         content = (choice["message"].get("content") or "").strip()
         reasoning = (choice["message"].get("reasoning_content") or "").strip() if enabled else ""
         self.last_error = "无"
-        LOG.info("model_completed provider=deepseek model=%s thinking=%s effort=%s finish=%s context_messages=%s context_chars=%s", selected["model"], enabled,
+        LOG.info("model_completed provider=deepseek model=%s thinking=%s effort=%s finish=%s context_messages=%s context_chars=%s reasoning_chars=%s", selected["model"], enabled,
                  s["effort"] if enabled else "none", choice.get("finish_reason", "unknown"),
-                 len(history), self.last_model[group]["chars"])
+                 len(history), self.last_model[group]["chars"], len(reasoning))
         if not content and choice.get("finish_reason") == "length":
             content = "这次生成达到长度上限，还没形成完整回答。可以缩小问题范围后再@我。" if at else "[SKIP]"
         return DeepSeekAnswer(content[:1200], reasoning)

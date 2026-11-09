@@ -32,6 +32,7 @@ Pull Request 请说明解决的问题、主要行为变化和验证结果。中�
 | --- | --- |
 | `bot.py` | QQ 网关、消息路由、绑定、会话设置、SQLite 记忆与回复格式 |
 | `chatgpt.py` | ChatGPT 登录、令牌校验与续期、模型列表、Responses 流和网页引用 |
+| `routing.py` | OpenAI Decisions 快速接话判断、模型/思考组合选择和有界输入 |
 | `weixin.py` | ClawBot 扫码登录、多账号私聊、持久化消息队列与权限过滤 |
 | `attachments.py` | QQ/微信附件解析、引用选择、下载解密及 Responses 多模态输入 |
 | `diagnostics.py` | QQ 发送失败记录、脱敏、期限与数量清理，以及管理员只读查看入口 |

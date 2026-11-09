@@ -33,6 +33,8 @@ HELP = """直接发送文字即可聊天，也可发送图片或文件后紧接�
 /状态  查看运行状态
 /模型  查看模型及切换用法
 /模型 列表  查看可用模型
+/模型 自动  自动选择模型和思考强度
+/模型 手动  使用保存的手动模型和强度
 /思考  查看思考强度
 /思考 高  使用高强度思考
 /思考 显示  展示 DeepSeek 思考过程
@@ -296,6 +298,7 @@ class WeixinBot(Bot):
         if text in ("/状态", "/status"):
             return (f"微信账号：{self.alias}\n连接：正常；仅本人私聊\n" + self.model_status(scope)
                     + "\n" + self.thinking_status(scope) + "\n" + self.memory_status(scope)
+                    + "\n" + self.routing_status(scope)
                     + f"\n最近错误：{self.last_error}")
         if name == "/模型":
             return await self.model_command(scope, text, "owner")

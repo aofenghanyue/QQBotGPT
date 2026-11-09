@@ -148,7 +148,7 @@ class RoutingConfigTests(unittest.TestCase):
             path = Path(folder) / "config.json"
             path.write_text(json.dumps({"openai_key_file": "private/openai.key"}), encoding="utf-8")
             config = load_config(path, require_qq=False)
-            self.assertEqual(Path(config["openai_key_file"]), Path(folder) / "private/openai.key")
+            self.assertEqual(Path(config["openai_key_file"]).resolve(), (Path(folder) / "private/openai.key").resolve())
             invalid = {"auto_model": ["true", 1, None], "auto_reply_decision": [1, "false"],
                        "decision_timeout_seconds": [0, 16, True, "5", float("nan")],
                        "auto_reply_threshold": [0.49, 1.1, True, float("inf")],

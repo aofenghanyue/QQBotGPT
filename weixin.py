@@ -349,7 +349,7 @@ class WeixinBot(Bot):
                         self.attachments.discard(self.scope, self.record['user_id'])
                         reply = "这条消息较长，请拆成每条12000字以内再发送。"
                     else:
-                        if (current or quoted) and self.model_settings(self.scope)["provider"] != "chatgpt":
+                        if (current or quoted) and not self.auto_model(self.scope) and self.model_settings(self.scope)["provider"] != "chatgpt":
                             raise AttachmentError("图片和文件阅读请先用 /模型 chatgpt 切换到 ChatGPT，再重新发送附件。")
                         media, reply = self.attachments.prepare(self.scope, self.record['user_id'],
                                                                mid, text, current, quoted, references)

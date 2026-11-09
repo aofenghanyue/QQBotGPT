@@ -10,7 +10,7 @@
   "openai_key_file": ".data/openai.key",
   "decision_timeout_seconds": 5,
   "auto_reply_threshold": 0.8,
-  "auto_model_max_effort": "high",
+  "auto_model_max_effort": "max",
   "auto_model_candidates": {},
   "model_timeout_seconds": null,
   "deepseek_model": "deepseek-flash",

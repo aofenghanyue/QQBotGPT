@@ -21,7 +21,8 @@ from chatgpt import ChatGPT, ChatGPTError, secure_directory, supported_efforts
 from filelock import FileLock, Timeout
 from attachments import AttachmentError, AttachmentStore, input_parts, qq_media
 from diagnostics import SendFailureStore
-from routing import RoutingError, candidates_for, decide, read_openai_key, validate_config as validate_routing_config
+from routing import (DOMAIN_LABELS, RoutingError, decide, provider_for, read_openai_key, select_model,
+                     validate_config as validate_routing_config)
 
 LOG = logging.getLogger("qqbot")
 MODEL_PROGRESS_SECONDS = 60
@@ -249,7 +250,9 @@ class Bot:
         source = "ChatGPT 计划" if settings["provider"] == "chatgpt" else "DeepSeek"
         automatic = self.auto_model(group)
         label = "手动/回退模型" if automatic else "模型"
-        return (f"模型选择：{'自动' if automatic else '手动'}\n调用方式：{source}\n"
+        source_line = (f"自动分流：闲聊生活用 DeepSeek；数理技术用 GPT，按六档难度选择\n手动/回退服务：{source}"
+                       if automatic else f"调用方式：{source}")
+        return (f"模型选择：{'自动' if automatic else '手动'}\n{source_line}\n"
                 f"{label}：{settings['model'] or '账户默认模型'}")
 
     def auto_model(self, group):
@@ -311,7 +314,7 @@ class Bot:
     async def model_command(self, group, text, role):
         args = text.split()[1:]
         usage = ("/模型 列表：查看当前服务的可用模型\n/模型 列表 chatgpt 或 deepseek\n"
-                 "/模型 自动：按问题选择模型和思考强度\n/模型 手动 或 /模型 自动 关闭：恢复手动设置\n"
+                 "/模型 自动：按类别跨服务分流，按六档难度选择模型和思考强度\n/模型 手动 或 /模型 自动 关闭：恢复手动设置\n"
                  "/模型 chatgpt gpt-6.1-sol\n/模型 deepseek deepseek-flash\n"
                  "/模型 模型名称：在当前服务内切换\n/模型 默认：恢复配置文件的选择\n"
                  "设置只影响当前会话，修改限绑定账号。")
@@ -377,10 +380,10 @@ class Bot:
         row = self.db.execute("SELECT seconds FROM group_timeout WHERE grp=?", (group,)).fetchone()
         value = row[0] if row else self.c.get("model_timeout_seconds")
         if value is None:
-            if self.model_settings(group)["provider"] == "chatgpt":
+            if self.auto_model(group) or self.model_settings(group)["provider"] == "chatgpt":
                 return 150
             mode = self.thinking(group)["mode"]
-            return 90 if self.auto_model(group) or mode == "all" or (mode == "at" and at) else 55
+            return 90 if mode == "all" or (mode == "at" and at) else 55
         if type(value) is not int or not 30 <= value <= 240:
             raise ValueError("model_timeout_seconds 必须为 30～240 的整数或 null")
         return value
@@ -568,6 +571,8 @@ class Bot:
             auto_status = f"最近自动判断：{when}（北京时间），{decision['result']}"
         selection = self.model_status(group)
         search = ("按需使用，实时问题会查询" if self.c.get("chatgpt_web_search", True) else "已关闭") if self.model_settings(group)["provider"] == "chatgpt" else "当前 DeepSeek 未接入"
+        if self.auto_model(group):
+            search = "实时查询自动交给 GPT" if self.c.get("chatgpt_web_search", True) else "已关闭"
         selection += "\n网页搜索：" + search
         selection += "\n" + self.timeout_status(group)
         selection += "\n" + self.routing_status(group)
@@ -833,7 +838,7 @@ class Bot:
                 self.attachments.discard(group, sender)
             else:
                 current, quoted, references = qq_media(data)
-                if (current or quoted) and self.model_settings(group)["provider"] != "chatgpt":
+                if (current or quoted) and not self.auto_model(group) and self.model_settings(group)["provider"] != "chatgpt":
                     raise AttachmentError("图片和文件阅读请先用 /模型 chatgpt 切换到 ChatGPT，再重新发送附件。")
                 if not at and text:
                     # Ordinary group chatter never uploads attachments automatically.
@@ -945,44 +950,49 @@ class Bot:
             return selected
         started = time.monotonic()
         timeout = self.c.get("decision_timeout_seconds", 5)
+        recent = {}
 
         async def evaluate():
             key = read_openai_key(self.c)
-            candidates = []
-            if automatic:
-                catalog = await self.model_catalog(selected["provider"])
-                # The existing selected model is the known attachment path. Do
-                # not infer multimodal support from model names or missing metadata.
-                attachment_model = (selected["model"] or catalog[0]["slug"]) if attachments and catalog else None
-                candidates = candidates_for(catalog, selected["provider"], self.c, attachment_model)
-            return await decide(self.http, key, history, at=at, candidates=candidates, judge_reply=judge_reply,
-                                attachment_types=[item.get("kind", "file") for item in attachments],
-                                timeout=timeout, reply_threshold=self.c.get("auto_reply_threshold", 0.8))
+            decision = await decide(self.http, key, history, at=at, classify=automatic, judge_reply=judge_reply,
+                                    attachment_types=[item.get("kind", "file") for item in attachments],
+                                    timeout=timeout, reply_threshold=self.c.get("auto_reply_threshold", 0.8))
+            recent.update(reply_probability=decision.reply_probability, confidence=decision.confidence,
+                          input_tokens=decision.input_tokens)
+            candidate = None
+            if decision.should_reply and decision.assessment:
+                assessment = decision.assessment
+                recent.update(domain=assessment.domain, difficulty=assessment.difficulty)
+                provider = provider_for(assessment, attachments=bool(attachments))
+                catalog = await self.model_catalog(provider)
+                candidate = select_model(catalog, assessment, self.c, attachments=bool(attachments))
+            return decision, candidate
 
         try:
             # The catalogue and decision share a short deadline inside the QQ
             # total reply deadline. Cancellation must continue to the caller.
-            decision = await asyncio.wait_for(evaluate(), timeout=timeout)
+            decision, candidate = await asyncio.wait_for(evaluate(), timeout=timeout)
         except (RoutingError, ChatGPTError, ApiError, aiohttp.ClientError, asyncio.TimeoutError,
                 ValueError, TypeError, KeyError, AttributeError) as exc:
             result = "快速判断失败，保持安静" if judge_reply else "自动选择失败，沿用手动设置"
-            self.last_routing[group] = {"result": result, "elapsed_ms": round((time.monotonic() - started) * 1000)}
+            self.last_routing[group] = {**recent, "result": result, "elapsed_ms": round((time.monotonic() - started) * 1000)}
             LOG.warning("routing_failed type=%s code=%s action=%s", type(exc).__name__,
                         str(exc) if isinstance(exc, RoutingError) else "unavailable", "skip" if judge_reply else "manual")
             return None if judge_reply else selected
         result = "不需要接话，保持安静" if not decision.should_reply else "允许接话，沿用手动设置"
         if decision.should_reply and automatic:
-            if decision.candidate is None:
+            if candidate is None:
                 result = "选择把握不足，沿用手动设置"
             else:
-                candidate = decision.candidate
-                selected.update(model=candidate.model, effort=candidate.effort, thinking=candidate.thinking)
-                result = f"自动选择 {candidate.model} / {candidate.effort or ('关闭' if candidate.thinking is False else '默认')}"
-        self.last_routing[group] = {"result": result, "elapsed_ms": round((time.monotonic() - started) * 1000),
-                                    "reply_probability": decision.reply_probability, "confidence": decision.confidence,
-                                    "input_tokens": decision.input_tokens}
-        LOG.info("routing_completed reply=%s auto_model=%s elapsed_ms=%s input_tokens=%s",
-                 decision.should_reply, automatic, self.last_routing[group]["elapsed_ms"], decision.input_tokens)
+                selected.update(provider=candidate.provider, model=candidate.model, effort=candidate.effort, thinking=candidate.thinking)
+                result = (f"{DOMAIN_LABELS[decision.assessment.domain]} L{decision.assessment.difficulty}；"
+                          f"自动选择 {candidate.provider} / {candidate.model} / {candidate.effort or ('关闭' if candidate.thinking is False else '默认')}")
+                if candidate.adjustment:
+                    result += "；" + candidate.adjustment
+        self.last_routing[group] = {**recent, "result": result, "elapsed_ms": round((time.monotonic() - started) * 1000)}
+        LOG.info("routing_completed reply=%s auto_model=%s domain=%s difficulty=%s elapsed_ms=%s input_tokens=%s",
+                 decision.should_reply, automatic, recent.get("domain"), recent.get("difficulty"),
+                 self.last_routing[group]["elapsed_ms"], decision.input_tokens)
         return selected if decision.should_reply else None
 
     async def answer(self, history, at, group="", attachments=()):

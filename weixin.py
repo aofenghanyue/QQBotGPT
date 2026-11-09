@@ -35,6 +35,8 @@ HELP = """直接发送文字即可聊天，也可发送图片或文件后紧接�
 /模型 列表  查看可用模型
 /思考  查看思考强度
 /思考 高  使用高强度思考
+/思考 显示  展示 DeepSeek 思考过程
+/思考 隐藏  隐藏过程，保留模型思考
 /记忆  查看记忆设置
 /记忆 200  保留最近200条消息
 /记忆 过期 360  闲置6小时清空
@@ -384,7 +386,7 @@ class WeixinBot(Bot):
                         LOG.warning("weixin_model_failed account=%s type=%s", self.alias, type(exc).__name__)
                         reply = self.last_error
                         chat = 0
-                parts = reasoning_messages(reply.reasoning) if isinstance(reply, DeepSeekAnswer) else []
+                parts = reasoning_messages(reply.reasoning) if isinstance(reply, DeepSeekAnswer) and self.reasoning_visible(self.scope) else []
                 LOG.info("weixin_reply_prepared account=%s reasoning_parts=%s", self.alias, len(parts))
                 reply = qq_reply(reply, sources, show_sources=self.c.get("chatgpt_show_sources", False)
                                  or wants_sources(text)) or "刚才未能生成有效回复，请再试一次。"
@@ -392,6 +394,8 @@ class WeixinBot(Bot):
                                 (reply, chat, json.dumps(parts, ensure_ascii=False), self.generation, mid))
                 self.db.commit()
             client_id = "qqbotgpt-" + hashlib.sha256((self.generation + ":" + mid).encode()).hexdigest()[:32]
+            if not self.reasoning_visible(self.scope):
+                parts, next_part, incomplete = [], 0, 0
             while next_part < len(parts) and not incomplete:
                 try:
                     # Each part keeps its identity across retries and process restarts.

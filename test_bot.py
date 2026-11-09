@@ -479,6 +479,7 @@ class BehaviourTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.http.post.call_args.kwargs["json"]["thinking"]["type"], "disabled")
 
     async def test_thinking_exhausted_budget_sends_notice_without_retry(self):
+        self.bot.reasoning_display_command("g1", "/思考 显示", "owner")
         self.fake_http(None, "length")
         self.bot.thinking_command("g1", "/思考 开启", "owner")
         self.bot.qq = AsyncMock()

@@ -25,6 +25,8 @@ class ReasoningMessageTests(unittest.TestCase):
 class ReasoningWorkerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.bot = Bot({"owner_only": False}, ":memory:")
+        self.bot.reasoning_display_command("g1", "/思考 显示", "owner")
+        self.bot.reasoning_display_command("private:self", "/思考 显示", "owner")
         self.bot.qq = AsyncMock()
         self.bot.answer = AsyncMock(return_value=DeepSeekAnswer("最终回答", "这是一段思考过程"))
 
@@ -65,6 +67,21 @@ class ReasoningWorkerTests(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(len(self.replies()), 1)
         self.assertEqual(self.replies()[0]["content"], "最终回答")
+
+    async def test_hide_command_keeps_thinking_and_only_sends_answer(self):
+        self.bot.thinking_command("g1", "/思考 开启", "owner")
+        before = self.bot.thinking("g1")
+        command = message("hide", text="/思考 隐藏")
+        command["author"]["member_role"] = "admin"
+        self.bot.accept("GROUP_AT_MESSAGE_CREATE", command)
+        await self.drain()
+        self.bot.answer.assert_not_awaited()
+        self.assertFalse(self.bot.reasoning_visible("g1"))
+        self.assertEqual(self.bot.thinking("g1"), before)
+        self.bot.qq.reset_mock()
+        self.bot.accept("GROUP_AT_MESSAGE_CREATE", message())
+        await self.drain()
+        self.assertEqual([r["content"] for r in self.replies()], ["最终回答"])
 
     async def test_progress_plus_three_reasoning_parts_plus_answer_fit_five_replies(self):
         released = asyncio.Event()

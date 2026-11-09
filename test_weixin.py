@@ -101,6 +101,7 @@ class WeixinTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("各微信号的记忆和设置独立", self.api.send.call_args.args[1])
 
     async def test_deepseek_reasoning_precedes_answer_and_stays_out_of_history(self):
+        await self.bot.command("/思考 显示")
         self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容。" * 2000)
         self.ingest(message())
         await self.bot.process_pending(self.api)
@@ -127,7 +128,51 @@ class WeixinTests(unittest.IsolatedAsyncioTestCase):
         self.api.send.assert_awaited_once()
         self.assertEqual(self.api.send.call_args.args[1], "最终回答")
 
+    async def test_display_default_hidden_and_independent_across_restart(self):
+        await self.bot.command("/思考 开启")
+        before = self.bot.thinking(self.bot.scope)
+        self.assertFalse(self.bot.reasoning_visible(self.bot.scope))
+        self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容")
+        self.ingest(message())
+        await self.bot.process_pending(self.api)
+        self.api.send.assert_awaited_once()
+        self.assertEqual(self.api.send.call_args.args[1], "最终回答")
+        await self.bot.command("/思考 显示")
+        self.assertTrue(self.bot.reasoning_visible(self.bot.scope))
+        self.assertFalse(self.bot.reasoning_visible("another-scope"))
+        denied = self.bot.reasoning_display_command(self.bot.scope, "/思考 隐藏", "member")
+        self.assertIn("只有", denied)
+        self.assertTrue(self.bot.reasoning_visible(self.bot.scope))
+        self.bot.db.close()
+        self.bot = WeixinBot(self.config, self.folder, record())
+        self.assertTrue(self.bot.reasoning_visible(self.bot.scope))
+        await self.bot.command("/思考 隐藏")
+        self.assertEqual(self.bot.thinking(self.bot.scope), before)
+        await self.bot.command("/思考 默认")
+        self.assertFalse(self.bot.reasoning_visible(self.bot.scope))
+        await self.bot.command("/思考 显示")
+        await self.bot.command("/思考 默认")
+        self.assertTrue(self.bot.reasoning_visible(self.bot.scope))
+
+    async def test_hiding_drops_pending_reasoning_after_restart(self):
+        await self.bot.command("/思考 显示")
+        self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容")
+        self.ingest(message())
+        self.api.send.side_effect = LoginExpired("expired")
+        with self.assertRaises(LoginExpired):
+            await self.bot.process_pending(self.api)
+        await self.bot.command("/思考 隐藏")
+        self.bot.db.close()
+        self.bot = WeixinBot(self.config, self.folder, record())
+        self.bot.answer = AsyncMock()
+        self.api.send.reset_mock(side_effect=True)
+        await self.bot.process_pending(self.api)
+        self.bot.answer.assert_not_awaited()
+        self.api.send.assert_awaited_once()
+        self.assertEqual(self.api.send.call_args.args[1], "最终回答")
+
     async def test_reasoning_failure_does_not_block_answer_or_repeat_after_restart(self):
+        await self.bot.command("/思考 显示")
         self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容" * 1000)
         self.ingest(message())
         self.api.send.side_effect = [WeixinError("rejected"), asyncio.TimeoutError()]
@@ -148,6 +193,7 @@ class WeixinTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.history[self.bot.scope][-1]["content"], "最终回答")
 
     async def test_restart_resumes_unsent_reasoning_with_stable_ids(self):
+        await self.bot.command("/思考 显示")
         self.bot.answer.return_value = DeepSeekAnswer("最终回答", "思考内容" * 1000)
         self.ingest(message())
         self.api.send.side_effect = [None, LoginExpired("expired")]

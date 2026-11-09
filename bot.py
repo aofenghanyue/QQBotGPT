@@ -209,6 +209,7 @@ class Bot:
         self.db.execute("CREATE TABLE IF NOT EXISTS spontaneous (day TEXT, grp TEXT, n INTEGER, PRIMARY KEY(day,grp))")
         self.db.execute("CREATE TABLE IF NOT EXISTS group_settings (grp TEXT PRIMARY KEY, settings TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS group_thinking (grp TEXT PRIMARY KEY, settings TEXT NOT NULL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS group_reasoning_display (grp TEXT PRIMARY KEY, enabled INTEGER NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS group_memory_settings (grp TEXT PRIMARY KEY, settings TEXT NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS group_memory (grp TEXT PRIMARY KEY, messages TEXT NOT NULL, updated REAL NOT NULL)")
         self.db.execute("CREATE TABLE IF NOT EXISTS memory_seen (id TEXT PRIMARY KEY, at REAL NOT NULL)")
@@ -361,6 +362,9 @@ class Bot:
         return "设置已保存，从下一次请求生效；重启后保留。\n" + self.timeout_status(group)
 
     async def chatgpt_thinking_command(self, group, text, role):
+        display_reply = self.reasoning_display_command(group, text, role)
+        if display_reply is not None:
+            return display_reply
         args = text.split()[1:]
         query = not args or args in (["查看"], ["帮助"])
         if not query and role not in ("owner", "admin"):
@@ -373,7 +377,7 @@ class Bot:
         allowed = supported_efforts(selected)
         names = {"none": "关闭", "minimal": "最低", "low": "低", "medium": "中", "high": "高", "xhigh": "超高", "max": "最高"}
         choices = "、".join(f"{names.get(e, e)}({e})" for e in allowed) or "模型默认"
-        usage = f"当前模型可选：{choices}\n/思考 高 或 /思考 强度 高\n/思考 默认"
+        usage = f"当前模型可选：{choices}\n/思考 高 或 /思考 强度 高\n/思考 默认\n/思考 显示 或 /思考 隐藏：设置 DeepSeek 过程展示"
         if query:
             return self.thinking_status(group) + "\n" + usage
         token = args[1] if len(args) == 2 and args[0] == "强度" else args[0] if len(args) == 1 else ""
@@ -542,19 +546,47 @@ class Bot:
             raise ValueError("Invalid thinking_effort")
         return settings
 
+    def reasoning_visible(self, group):
+        row = self.db.execute("SELECT enabled FROM group_reasoning_display WHERE grp=?", (group,)).fetchone()
+        return bool(row[0]) if row else False
+
+    def reasoning_display_status(self, group):
+        return "DeepSeek 思考过程展示：" + ("显示" if self.reasoning_visible(group) else "隐藏") + "（不影响模型思考）"
+
+    def reasoning_display_command(self, group, text, role):
+        args = text.split()[1:]
+        if not args or args[0] not in ("显示", "隐藏", "展示"):
+            return None
+        usage = "/思考 显示：展示 DeepSeek 思考过程\n/思考 隐藏：仅显示回答，模型继续按原设置思考\n/思考 展示：查看展示设置"
+        if args == ["展示"]:
+            return self.reasoning_display_status(group) + "\n" + usage
+        choices = {("显示",): True, ("隐藏",): False, ("展示", "开启"): True, ("展示", "关闭"): False}
+        if tuple(args) not in choices:
+            return "参数有误，设置未更改。\n" + usage
+        if role not in ("owner", "admin"):
+            return "只有本会话的绑定账号可以修改展示设置。" if self.c.get("owner_only", True) else "只有群主或管理员可以修改展示设置。"
+        self.db.execute("INSERT INTO group_reasoning_display VALUES (?,?) ON CONFLICT(grp) DO UPDATE SET enabled=excluded.enabled",
+                        (group, int(choices[tuple(args)])))
+        self.db.commit()
+        return "展示设置已保存，重启后保留；模型思考模式和强度保持不变。\n" + self.reasoning_display_status(group)
+
     def thinking_status(self, group):
         if self.model_settings(group)["provider"] == "chatgpt":
-            return "ChatGPT 思考强度：" + (self.chatgpt_effort(group) or "模型默认")
+            return "ChatGPT 思考强度：" + (self.chatgpt_effort(group) or "模型默认") + "\n" + self.reasoning_display_status(group)
         s = self.thinking(group)
         mode = {"off": "关闭", "at": "仅@回复开启，自动接话关闭", "all": "全部开启（@回复和自动接话）"}
         effort = {"low": "低", "high": "高", "max": "最高"}
-        return f"本群思考模式：{mode[s['mode']]}\n思考强度：{effort[s['effort']]}（开启时生效）"
+        return f"本群思考模式：{mode[s['mode']]}\n思考强度：{effort[s['effort']]}（开启时生效）\n" + self.reasoning_display_status(group)
 
     def thinking_command(self, group, text, role):
+        display_reply = self.reasoning_display_command(group, text, role)
+        if display_reply is not None:
+            return display_reply
         args = text.split()[1:]
         usage = ("/思考 开启：@回复和自动接话均开启\n/思考 仅@：只对@回复开启\n"
                  "/思考 关闭\n/思考 强度 低|高|最高\n/思考 默认：恢复服务器默认值\n"
-                 "开启后可能增加等待时间和token消耗；会先发送模型返回的思考过程，再发送回答。")
+                 "/思考 显示 或 /思考 隐藏：独立控制过程展示，默认隐藏\n"
+                 "开启思考可能增加等待时间和token消耗；开启展示后先发送模型返回的思考过程，再发送回答。")
         if not args or args == ["查看"]:
             return self.thinking_status(group) + "\n" + usage
         if args == ["帮助"]:
@@ -580,7 +612,7 @@ class Bot:
         self.db.commit()
         LOG.info("thinking_updated")
         return ("设置已保存，重启后仍有效；从下一次模型请求生效。\n" +
-                self.thinking_status(group) + "\n开启后可能增加等待时间和token消耗；会先发送模型返回的思考过程，再发送回答。")
+                self.thinking_status(group) + "\n/思考 显示 或 /思考 隐藏：独立控制过程展示。开启展示后先发送模型返回的思考过程，再发送回答。")
 
     def frequency(self, group):
         settings = {key: self.c.get(key, default) for key, default in (
@@ -1045,7 +1077,7 @@ class Bot:
                 if self.c.get("owner_only", True) and command:
                     reply = reply.replace("本群", "本会话")
                 reasoning = generated_answer.reasoning if isinstance(generated_answer, DeepSeekAnswer) else ""
-                parts = reasoning_messages(reasoning)
+                parts = reasoning_messages(reasoning) if self.reasoning_visible(group) else []
                 reasoning_incomplete = False
                 for part in parts:
                     remaining = MODEL_REPLY_BUDGET - (time.time() - stamp)
